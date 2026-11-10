@@ -31,7 +31,7 @@ $('findNearby').onclick=async()=>{
  };
  try{
   const geo=await fetchTimed('https://api.zippopotam.us/us/'+zip,{},12000);
-  if(!geo.ok)throw Error('ZIP code lookup is unavailable.');
+  if(!geo.ok)throw Error('ZIP code lookup failed (HTTP '+geo.status+').');
   const data=await geo.json(),place=data.places?.[0];
   if(!place)throw Error('ZIP code was not found.');
   const lat=Number(place.latitude),lon=Number(place.longitude);
@@ -41,6 +41,7 @@ $('findNearby').onclick=async()=>{
   const query=`[out:json][timeout:20];nwr(around:6500,${lat},${lon})["amenity"~"^(restaurant|fast_food|cafe|food_court)$"]["name"];out tags 200;`;
   const endpoints=[
    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.nchc.org.tw/api/interpreter',
    'https://overpass.private.coffee/api/interpreter',
    'https://overpass-api.de/api/interpreter',
    'https://overpass.nchc.org.tw/api/interpreter'
@@ -52,20 +53,20 @@ $('findNearby').onclick=async()=>{
    // GET avoids cross-origin preflight that can block form-encoded POST requests.
    try{
     const response=await fetchTimed(endpoint+'?data='+encodeURIComponent(query),{headers:{Accept:'application/json'}},22000);
-    if(!response.ok){failures.push('HTTP '+response.status);continue}
+    if(!response.ok){failures.push(new URL(endpoint).hostname+': HTTP '+response.status);continue}
     const payload=await response.json();
-    if(!Array.isArray(payload.elements)){failures.push('Invalid response');continue}
+    if(!Array.isArray(payload.elements)){failures.push(new URL(endpoint).hostname+': invalid response');continue}
     elements=payload.elements;break;
-   }catch(err){failures.push(err.name==='AbortError'?'Timed out':'Connection blocked or failed')}
+   }catch(err){failures.push(new URL(endpoint).hostname+': '+(err.name==='AbortError'?'timed out':(err.message||'connection blocked or failed')))}
   }
-  if(!elements)throw Error('Automatic restaurant lookup is unavailable ('+failures.join(', ')+').');
+  if(!elements)throw Error('Restaurant servers could not be reached: '+failures.join('; ')+'.');
   const names=[...new Set(elements.map(e=>e.tags?.name?.trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   let added=0;
   for(const name of names){if(!restaurants.some(x=>x.toLowerCase()===name.toLowerCase())){restaurants.push(name);added++}}
   save('restaurants',restaurants);renderList('restaurants');
   status.textContent=`${place['place name']}, ${place['state abbreviation']}: ${names.length} places found, ${added} new saved.`;
   if(!names.length)backup.classList.remove('hidden');
- }catch(err){status.textContent=(err.message||'Restaurant search unavailable.')+' Your saved restaurants are safe. Use Google Maps below if needed.';backup.classList.remove('hidden')}
+ }catch(err){status.textContent=(err.name==='AbortError'?'ZIP lookup timed out.':(err.message||'Restaurant search unavailable.'))+' Your saved restaurants are safe. Use Google Maps below if needed.';backup.classList.remove('hidden')}
  finally{btn.disabled=false}
 };
 
