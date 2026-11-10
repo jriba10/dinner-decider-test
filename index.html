@@ -25,37 +25,50 @@ $('findNearby').onclick=async()=>{
  if(!/^\d{5}$/.test(zip)){status.textContent='Enter a valid 5-digit US ZIP Code.';return}
  $('mapsFallback').href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent('restaurants near '+zip+' USA');
  backup.classList.add('hidden');btn.disabled=true;status.textContent='Finding restaurants near '+zip+'…';
- const fetchTimed=async(url,ms=11000)=>{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),ms);try{return await fetch(url,{signal:controller.signal,headers:{Accept:'application/json'}})}finally{clearTimeout(timer)}};
+ const fetchTimed=async(url,options={},ms=18000)=>{
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ms);
+  try{return await fetch(url,{...options,signal:controller.signal})}finally{clearTimeout(timer)}
+ };
  try{
-  const geo=await fetchTimed('https://api.zippopotam.us/us/'+zip,10000);
-  if(!geo.ok)throw Error('ZIP lookup unavailable');
+  const geo=await fetchTimed('https://api.zippopotam.us/us/'+zip,{},12000);
+  if(!geo.ok)throw Error('ZIP code lookup is unavailable.');
   const data=await geo.json(),place=data.places?.[0];
-  if(!place)throw Error('ZIP code was not found');
+  if(!place)throw Error('ZIP code was not found.');
   const lat=Number(place.latitude),lon=Number(place.longitude);
-  if(!Number.isFinite(lat)||!Number.isFinite(lon))throw Error('ZIP code has no usable coordinates');
-  // Keep the request bounded so free public Overpass servers can answer quickly.
-  const query=`[out:json][timeout:12];nwr["amenity"~"^(restaurant|fast_food|cafe)$"]["name"](around:4500,${lat},${lon});out tags 120;`;
-  const endpoints=['https://overpass.kumi.systems/api/interpreter','https://overpass.nchc.org.tw/api/interpreter','https://overpass.private.coffee/api/interpreter'];
-  let result=null;
+  if(!Number.isFinite(lat)||!Number.isFinite(lon))throw Error('ZIP code coordinates are unavailable.');
+  // Overpass is a volunteer-operated OpenStreetMap service, not a guaranteed commercial API.
+  // Query nodes, ways and relations; request only tags to reduce response size.
+  const query=`[out:json][timeout:20];nwr(around:6500,${lat},${lon})["amenity"~"^(restaurant|fast_food|cafe|food_court)$"]["name"];out tags 200;`;
+  const endpoints=[
+   'https://overpass.kumi.systems/api/interpreter',
+   'https://overpass.private.coffee/api/interpreter',
+   'https://overpass-api.de/api/interpreter',
+   'https://overpass.nchc.org.tw/api/interpreter'
+  ];
+  let elements=null,failures=[];
   for(let i=0;i<endpoints.length;i++){
-   status.textContent=`Searching ${place['place name']}… (${i+1} of ${endpoints.length})`;
+   status.textContent=`Searching near ${place['place name']}… (${i+1}/${endpoints.length})`;
+   const endpoint=endpoints[i];
+   // GET avoids cross-origin preflight that can block form-encoded POST requests.
    try{
-    const response=await fetchTimed(endpoints[i]+'?data='+encodeURIComponent(query),11000);
-    if(!response.ok)continue;
+    const response=await fetchTimed(endpoint+'?data='+encodeURIComponent(query),{headers:{Accept:'application/json'}},22000);
+    if(!response.ok){failures.push('HTTP '+response.status);continue}
     const payload=await response.json();
-    if(Array.isArray(payload.elements)){result=payload;break}
-   }catch(err){/* Try the next independent provider. */}
+    if(!Array.isArray(payload.elements)){failures.push('Invalid response');continue}
+    elements=payload.elements;break;
+   }catch(err){failures.push(err.name==='AbortError'?'Timed out':'Connection blocked or failed')}
   }
-  if(!result)throw Error('Automatic restaurant lookup is temporarily unavailable.');
-  const names=[...new Set(result.elements.map(e=>e.tags?.name?.trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  if(!elements)throw Error('Automatic restaurant lookup is unavailable ('+failures.join(', ')+').');
+  const names=[...new Set(elements.map(e=>e.tags?.name?.trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   let added=0;
   for(const name of names){if(!restaurants.some(x=>x.toLowerCase()===name.toLowerCase())){restaurants.push(name);added++}}
   save('restaurants',restaurants);renderList('restaurants');
   status.textContent=`${place['place name']}, ${place['state abbreviation']}: ${names.length} places found, ${added} new saved.`;
   if(!names.length)backup.classList.remove('hidden');
- }catch(err){status.textContent=(err.message||'Restaurant search unavailable')+' Your saved restaurants are safe. Use Google Maps below to find places and add them manually.';backup.classList.remove('hidden')}
+ }catch(err){status.textContent=(err.message||'Restaurant search unavailable.')+' Your saved restaurants are safe. Use Google Maps below if needed.';backup.classList.remove('hidden')}
  finally{btn.disabled=false}
 };
+
 function recordDinner(name){dinnerHistory.unshift({name,date:new Date().toISOString()});dinnerHistory=dinnerHistory.slice(0,365);save('dinnerHistory',dinnerHistory);renderRotation()}
 function renderRotation(){const now=Date.now();const sorted=meals.map(name=>{const entry=dinnerHistory.find(x=>x.name.toLowerCase()===name.toLowerCase());return {name,date:entry?Date.parse(entry.date):0}}).filter(x=>!x.date||now-x.date>=14*86400000).sort((a,b)=>a.date-b.date||a.name.localeCompare(b.name));const select=$('recentMealSelect'),previous=select.value;select.innerHTML=sorted.length?'<option value="">Select a meal…</option>'+sorted.map(x=>{const days=x.date?Math.max(0,Math.floor((now-x.date)/86400000)):null;const label=days===null?'Not recorded yet':days+' days ago';return '<option value="'+encodeURIComponent(x.name)+'">'+escapeHTML(x.name)+' — '+label+'</option>'}).join(''):'<option value="">No meals available</option>';if(sorted.some(x=>encodeURIComponent(x.name)===previous))select.value=previous;select.disabled=!sorted.length;$('recordRecentMeal').disabled=!select.value;select.onchange=()=>{$('recordRecentMeal').disabled=!select.value};$('recordRecentMeal').onclick=()=>{if(select.value)recordDinner(decodeURIComponent(select.value))};$('rotationList').textContent=sorted.length?'':meals.length?'You’ve had all your saved meals in the last 14 days. They’ll reappear automatically.':'Add meals to start tracking.';$('dinnerHistory').innerHTML=dinnerHistory.length?dinnerHistory.slice(0,30).map((x,i)=>'<div class="item"><span>'+escapeHTML(x.name)+' <small class="muted">'+new Date(x.date).toLocaleDateString()+'</small></span><button class="tiny" data-undo="'+i+'" aria-label="Remove history entry">✕</button></div>').join(''):'<p class="muted">No dinners recorded yet.</p>';document.querySelectorAll('[data-undo]').forEach(b=>b.onclick=()=>{dinnerHistory.splice(Number(b.dataset.undo),1);save('dinnerHistory',dinnerHistory);renderRotation()})}
 $('clearHistory').onclick=()=>{if(confirm('Clear all recorded dinner history?')){dinnerHistory=[];save('dinnerHistory',dinnerHistory);renderRotation()}};
